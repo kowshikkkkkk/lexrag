@@ -1,0 +1,83 @@
+import uuid
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from config.settings import get_settings
+from config.constants import API_PREFIX
+from config.exceptions import (
+    LexRAGError,
+    BelowConfidenceThresholdError,
+    UnsupportedFileTypeError,
+    DuplicateDocumentError,
+    LLMConnectionError,
+)
+from observability.logger import setup_logger, trace_id_var
+
+settings = get_settings()
+logger = setup_logger(__name__, settings.log_level)
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="LexRAG",
+        description="Production-grade Legal Document Retrieval and Q&A System",
+        version="1.0.0",
+        docs_url=f"{API_PREFIX}/docs",
+        redoc_url=f"{API_PREFIX}/redoc",
+    )
+
+    # ── Middleware ────────────────────────────────────────────────────────
+    @app.middleware("http")
+    async def trace_middleware(request: Request, call_next):
+        # Set trace ID for every request — comes from header or generated fresh
+        trace_id = request.headers.get("X-Trace-ID", str(uuid.uuid4())[:8])
+        trace_id_var.set(trace_id)
+        response = await call_next(request)
+        response.headers["X-Trace-ID"] = trace_id
+        return response
+
+    # ── Exception handlers ────────────────────────────────────────────────
+    @app.exception_handler(BelowConfidenceThresholdError)
+    async def confidence_handler(request: Request, exc: BelowConfidenceThresholdError):
+        return JSONResponse(
+            status_code=200,
+            content={"answer": str(exc), "sources": [], "confidence": "low"},
+        )
+
+    @app.exception_handler(UnsupportedFileTypeError)
+    async def unsupported_file_handler(request: Request, exc: UnsupportedFileTypeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "UnsupportedFileType", "detail": str(exc)},
+        )
+
+    @app.exception_handler(DuplicateDocumentError)
+    async def duplicate_handler(request: Request, exc: DuplicateDocumentError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": "DuplicateDocument", "detail": str(exc)},
+        )
+
+    @app.exception_handler(LLMConnectionError)
+    async def llm_connection_handler(request: Request, exc: LLMConnectionError):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "LLMUnavailable", "detail": str(exc)},
+        )
+
+    @app.exception_handler(LexRAGError)
+    async def generic_lexrag_handler(request: Request, exc: LexRAGError):
+        logger.error(str(exc), extra={"error_type": type(exc).__name__})
+        return JSONResponse(
+            status_code=500,
+            content={"error": type(exc).__name__, "detail": str(exc)},
+        )
+
+    # ── Routes ────────────────────────────────────────────────────────────
+    @app.get(f"{API_PREFIX}/health")
+    async def health():
+        return {"status": "ok", "service": "LexRAG", "version": "1.0.0"}
+
+    # Ingestion and query routers added in Step 9
+
+    return app
