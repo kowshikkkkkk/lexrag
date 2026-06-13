@@ -135,6 +135,8 @@ class VectorStore:
         """
         self._ensure_connected()
 
+        from qdrant_client.models import QueryRequest
+
         qdrant_filter = None
         if filters:
             conditions = [
@@ -144,16 +146,16 @@ class VectorStore:
             qdrant_filter = Filter(must=conditions)
 
         with Timer("qdrant_search", logger) as t:
-            results = self._client.search(
+            results = self._client.query_points(
                 collection_name=settings.qdrant_collection_name,
-                query_vector=query_vector.tolist(),
+                query=query_vector.tolist(),
                 limit=top_k,
                 query_filter=qdrant_filter,
                 with_payload=True,
             )
 
         hits = []
-        for r in results:
+        for r in results.points:
             hits.append({
                 "text": r.payload.get("text", ""),
                 "metadata": r.payload,
