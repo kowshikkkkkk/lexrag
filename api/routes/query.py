@@ -9,6 +9,10 @@ from retrieval.reranker import reranker
 from generation.query_rewriter import query_rewriter
 from generation.generator import generator
 from observability.logger import setup_logger, Timer
+from config.settings import get_settings
+settings = get_settings()
+
+
 
 logger = setup_logger(__name__)
 router = APIRouter(prefix="/query", tags=["Query"])
@@ -41,19 +45,43 @@ def _run_pipeline(request: QueryRequest) -> tuple[str, str, list, dict]:
 async def query(request: QueryRequest):
     """
     Ask a question grounded in ingested legal documents.
-    Returns a cited answer with source references.
+    Low confidence responses go to human review queue.
     """
-    with Timer("full_query_pipeline", logger) as t:
-        original_query, rewritten, reranked = _run_pipeline(request)
+    from api.routes.review import add_to_review_queue
 
-        # Step 4 — Generate
-        result = generator.generate(rewritten, reranked)
+    original_query, rewritten, reranked = _run_pipeline(request)
 
+    # Check top reranker score against review threshold
+    top_score = reranked[0].get("rerank_score", 0) if reranked else 0
+    needs_review = top_score < settings.review_threshold
+
+    # Generate draft answer
+    result = generator.generate(rewritten, reranked)
     sources = [Source(**s) for s in result["sources"]]
+
+    if needs_review:
+        review_id = add_to_review_queue(
+            query=original_query,
+            rewritten_query=rewritten,
+            chunks=reranked,
+            draft_answer=result["answer"],
+            sources=result["sources"],
+        )
+        logger.info(
+            "Low confidence — sent to review",
+            extra={"review_id": review_id, "top_score": top_score}
+        )
+        return QueryResponse(
+            query=original_query,
+            rewritten_query=rewritten,
+            answer=f"[Under Review: {review_id}] {result['answer']}",
+            sources=sources,
+            model=result["model"],
+        )
 
     logger.info(
         "Query pipeline complete",
-        extra={"query": original_query[:80], "latency_ms": round(t.elapsed_ms, 2)}
+        extra={"query": original_query[:80], "top_score": top_score}
     )
 
     return QueryResponse(

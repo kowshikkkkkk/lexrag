@@ -91,7 +91,9 @@ def create_app() -> FastAPI:
     # Routers
     from api.routes.ingest import router as ingest_router
     from api.routes.query import router as query_router
+    from api.routes.review import router as review_router
     app.include_router(ingest_router, prefix=API_PREFIX)
     app.include_router(query_router, prefix=API_PREFIX)
+    app.include_router(review_router, prefix=API_PREFIX)
 
     return app
