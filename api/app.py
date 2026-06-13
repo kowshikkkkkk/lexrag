@@ -72,12 +72,26 @@ def create_app() -> FastAPI:
             status_code=500,
             content={"error": type(exc).__name__, "detail": str(exc)},
         )
+# ── Startup/Shutdown events ───────────────────────────────────────────
+    @app.on_event("startup")
+    async def startup():
+        from embeddings.embedder import embedder
+        from vectorstore.store import vector_store
+        from retrieval.reranker import reranker
 
+        embedder.load()
+        vector_store.connect()
+        reranker.load()
+        logger.info("All components initialized")
     # ── Routes ────────────────────────────────────────────────────────────
     @app.get(f"{API_PREFIX}/health")
     async def health():
         return {"status": "ok", "service": "LexRAG", "version": "1.0.0"}
 
-    # Ingestion and query routers added in Step 9
+    # Routers
+    from api.routes.ingest import router as ingest_router
+    from api.routes.query import router as query_router
+    app.include_router(ingest_router, prefix=API_PREFIX)
+    app.include_router(query_router, prefix=API_PREFIX)
 
     return app
