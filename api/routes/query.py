@@ -1,7 +1,9 @@
+import time
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 from api.schemas import QueryRequest, QueryResponse, Source
+from config.settings import get_settings
 from config.exceptions import BelowConfidenceThresholdError
 from config.constants import INSUFFICIENT_INFO_RESPONSE
 from retrieval.retriever import retriever
@@ -9,36 +11,44 @@ from retrieval.reranker import reranker
 from generation.query_rewriter import query_rewriter
 from generation.generator import generator
 from observability.logger import setup_logger, Timer
-from config.settings import get_settings
-settings = get_settings()
-
-
+from observability.mlflow_tracker import log_query
 
 logger = setup_logger(__name__)
+settings = get_settings()
 router = APIRouter(prefix="/query", tags=["Query"])
 
 
-def _run_pipeline(request: QueryRequest) -> tuple[str, str, list, dict]:
+def _run_pipeline(request: QueryRequest):
     """
     Shared pipeline logic for both standard and streaming endpoints.
-    Returns: original_query, rewritten_query, reranked_chunks, generation_result
+    Returns original_query, rewritten_query, reranked_chunks, timings
     """
     original_query = request.query
 
     # Step 1 — Query rewriting
+    t0 = time.perf_counter()
     if request.rewrite:
         rewritten = query_rewriter.rewrite(original_query)
     else:
         rewritten = original_query
+    rewrite_ms = (time.perf_counter() - t0) * 1000
 
     # Step 2 — Hybrid retrieval
     filters = {"doc_type": request.doc_type} if request.doc_type else None
+    t0 = time.perf_counter()
     chunks = retriever.retrieve(rewritten, top_k=request.top_k, filters=filters)
+    retrieval_ms = (time.perf_counter() - t0) * 1000
 
     # Step 3 — Reranking
+    t0 = time.perf_counter()
     reranked = reranker.rerank(rewritten, chunks, top_k=request.top_k)
+    rerank_ms = (time.perf_counter() - t0) * 1000
 
-    return original_query, rewritten, reranked
+    return original_query, rewritten, reranked, {
+        "rewrite_ms": rewrite_ms,
+        "retrieval_ms": retrieval_ms,
+        "rerank_ms": rerank_ms,
+    }
 
 
 @router.post("", response_model=QueryResponse)
@@ -49,15 +59,34 @@ async def query(request: QueryRequest):
     """
     from api.routes.review import add_to_review_queue
 
-    original_query, rewritten, reranked = _run_pipeline(request)
+    total_start = time.perf_counter()
+    original_query, rewritten, reranked, timings = _run_pipeline(request)
 
-    # Check top reranker score against review threshold
+    # Check confidence
     top_score = reranked[0].get("rerank_score", 0) if reranked else 0
     needs_review = top_score < settings.review_threshold
 
-    # Generate draft answer
+    # Generate
+    t0 = time.perf_counter()
     result = generator.generate(rewritten, reranked)
+    generation_ms = (time.perf_counter() - t0) * 1000
+    total_ms = (time.perf_counter() - total_start) * 1000
+
     sources = [Source(**s) for s in result["sources"]]
+
+    # Log to MLflow — fires in background thread
+    log_query(
+        query=original_query,
+        rewritten_query=rewritten,
+        retrieval_latency_ms=timings["retrieval_ms"],
+        rerank_latency_ms=timings["rerank_ms"],
+        generation_latency_ms=generation_ms,
+        total_latency_ms=total_ms,
+        top_rerank_score=top_score,
+        chunks_retrieved=len(reranked),
+        answer_length=len(result["answer"]),
+        went_to_review=needs_review,
+    )
 
     if needs_review:
         review_id = add_to_review_queue(
@@ -81,7 +110,7 @@ async def query(request: QueryRequest):
 
     logger.info(
         "Query pipeline complete",
-        extra={"query": original_query[:80], "top_score": top_score}
+        extra={"query": original_query[:80], "total_ms": round(total_ms, 2)}
     )
 
     return QueryResponse(
@@ -99,16 +128,13 @@ async def stream_query(
     doc_type: str = None,
     rewrite: bool = True,
 ):
-    """
-    Streaming version of query — returns tokens via SSE as they are generated.
-    """
+    """Streaming version — returns tokens via SSE."""
     request = QueryRequest(query=query, doc_type=doc_type, rewrite=rewrite)
-    original_query, rewritten, reranked = _run_pipeline(request)
+    original_query, rewritten, reranked, _ = _run_pipeline(request)
 
     def event_stream():
         try:
             for token in generator.stream(rewritten, reranked):
-                # SSE format — each event is "data: <content>\n\n"
                 yield f"data: {token}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
@@ -120,6 +146,6 @@ async def stream_query(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "X-Accel-Buffering": "no",
         }
     )
