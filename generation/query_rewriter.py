@@ -8,13 +8,21 @@ logger = setup_logger(__name__)
 settings = get_settings()
 
 REWRITE_PROMPT = """You are a legal query optimizer for Indian law.
-Rewrite the user's question into a clear, specific query optimized for searching Indian legal documents.
+Rewrite the user's question into a clear query for searching legal documents.
 
-Rules:
-- Expand abbreviations (420 → Section 420 IPC, CrPC → Code of Criminal Procedure)
-- Add legal context if missing
-- Keep it concise — one sentence only
+STRICT RULES:
+- Expand abbreviations only (IPC → Indian Penal Code, CrPC → Code of Criminal Procedure)
+- Add general legal context if missing
+- NEVER add section numbers unless the user explicitly stated one
+- If user said "420" treat it as a section number they mentioned — keep it
+- If user did NOT mention a section number — do NOT add one
+- One sentence only
 - Return ONLY the rewritten query, nothing else
+
+Examples:
+"what is cheating under IPC" → "What is the definition and punishment of cheating under the Indian Penal Code?"
+"what does 420 mean in law" → "What is the meaning of Section 420 of the Indian Penal Code?"
+"punishment for stealing" → "What is the punishment for theft under the Indian Penal Code?"
 
 User question: {query}
 Rewritten query:"""
