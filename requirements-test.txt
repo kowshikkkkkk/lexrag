@@ -1,13 +1,10 @@
 fastapi
-uvicorn[standard]
 pydantic
 pydantic-settings
-python-multipart
 python-dotenv
 pypdf
 python-docx
 rank-bm25
 pytest
 pytest-asyncio
-qdrant-client
 groq
