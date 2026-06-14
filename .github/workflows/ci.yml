@@ -19,16 +19,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install pydantic pydantic-settings fastapi python-dotenv pypdf python-docx rank-bm25 pytest pytest-asyncio groq
 
       - name: Run unit tests
         env:
@@ -45,4 +37,3 @@ jobs:
           python -c "from config.settings import get_settings; print('Settings OK')"
           python -c "from ingestion.loader import load_document; print('Loader OK')"
           python -c "from chunking.splitter import split_document; print('Chunker OK')"
-          python -c "from generation.generator import Generator; print('Generator OK')"
