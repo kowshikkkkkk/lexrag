@@ -33,16 +33,19 @@ class VectorStore:
         return cls._instance
 
     def connect(self):
-        """Connect to Qdrant and ensure collection exists."""
+        """Connect to Qdrant."""
         if self._client is not None:
             return
 
         try:
-            # Local mode — no Docker needed
-            # Switch to QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
-            # in Step 13 when Docker is running
-            self._client = QdrantClient(path="./data/qdrant")
-            logger.info("Connected to Qdrant", extra={"mode": "local"})
+            self._client = QdrantClient(
+                host=settings.qdrant_host,
+                port=settings.qdrant_port,
+            )
+            logger.info(
+                "Connected to Qdrant",
+                extra={"host": settings.qdrant_host, "port": settings.qdrant_port}
+            )
             self._ensure_collection()
         except Exception as e:
             raise VectorStoreError(f"Failed to connect to Qdrant: {e}")
