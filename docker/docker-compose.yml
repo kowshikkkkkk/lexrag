@@ -1,0 +1,42 @@
+services:
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: lexrag-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - ../data/qdrant:/qdrant/storage
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:6333/health || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: lexrag-app
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    container_name: lexrag-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - ../data:/data
+    command: >
+      mlflow server --backend-store-uri sqlite:///data/mlflow/mlflow.db --host 0.0.0.0 --port 5000
