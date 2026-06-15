@@ -13,6 +13,20 @@ services:
       timeout: 5s
       retries: 3
 
+  redis:
+    image: redis:7-alpine
+    container_name: lexrag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ../data/redis:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   app:
     build:
       context: ..
@@ -25,10 +39,14 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
       - ../data:/app/data
     depends_on:
       qdrant:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   mlflow:

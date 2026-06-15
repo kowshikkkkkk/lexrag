@@ -75,11 +75,22 @@ def create_app() -> FastAPI:
         from embeddings.embedder import embedder
         from vectorstore.store import vector_store
         from retrieval.reranker import reranker
+        from retrieval.bm25_index import bm25_index
         from observability.mlflow_tracker import init_mlflow
+        from observability.cache import query_cache
 
         embedder.load()
         vector_store.connect()
         reranker.load()
+        query_cache.connect()
+
+        bm25_index.load()
+        if not bm25_index.is_ready:
+            bm25_index.rebuild_from_qdrant(
+                vector_store._client,
+                settings.qdrant_collection_name
+            )
+
         init_mlflow()
         logger.info("All components initialized")
 

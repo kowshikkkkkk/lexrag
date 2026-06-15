@@ -55,18 +55,23 @@ def _run_pipeline(request: QueryRequest):
 async def query(request: QueryRequest):
     """
     Ask a question grounded in ingested legal documents.
+    Results are cached in Redis for 1 hour.
     Low confidence responses go to human review queue.
     """
     from api.routes.review import add_to_review_queue
+    from observability.cache import query_cache
+
+    # Check cache first
+    cached = query_cache.get(request.query, request.doc_type, request.rewrite)
+    if cached:
+        return QueryResponse(**cached)
 
     total_start = time.perf_counter()
     original_query, rewritten, reranked, timings = _run_pipeline(request)
 
-    # Check confidence
     top_score = reranked[0].get("rerank_score", 0) if reranked else 0
     needs_review = top_score < settings.review_threshold
 
-    # Generate
     t0 = time.perf_counter()
     result = generator.generate(rewritten, reranked)
     generation_ms = (time.perf_counter() - t0) * 1000
@@ -74,7 +79,7 @@ async def query(request: QueryRequest):
 
     sources = [Source(**s) for s in result["sources"]]
 
-    # Log to MLflow — fires in background thread
+    # Log to MLflow
     log_query(
         query=original_query,
         rewritten_query=rewritten,
@@ -108,12 +113,7 @@ async def query(request: QueryRequest):
             model=result["model"],
         )
 
-    logger.info(
-        "Query pipeline complete",
-        extra={"query": original_query[:80], "total_ms": round(total_ms, 2)}
-    )
-
-    return QueryResponse(
+    response_data = QueryResponse(
         query=original_query,
         rewritten_query=rewritten,
         answer=result["answer"],
@@ -121,6 +121,21 @@ async def query(request: QueryRequest):
         model=result["model"],
     )
 
+    # Cache the result — only cache high confidence answers
+    if not needs_review:
+        query_cache.set(
+            request.query,
+            request.doc_type,
+            request.rewrite,
+            response_data.model_dump(),
+        )
+
+    logger.info(
+        "Query pipeline complete",
+        extra={"query": original_query[:80], "total_ms": round(total_ms, 2)}
+    )
+
+    return response_data
 
 @router.get("/stream")
 async def stream_query(

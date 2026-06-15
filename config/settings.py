@@ -41,8 +41,16 @@ class Settings(BaseSettings):
     api_port: int = Field(8000, env="API_PORT")
     log_level: str = Field("INFO", env="LOG_LEVEL")
 
+# Redis
+    redis_host: str = Field("localhost", env="REDIS_HOST")
+    redis_port: int = Field(6379, env="REDIS_PORT")
+    redis_ttl: int = Field(3600, env="REDIS_TTL")  # 1 hour cache
+    redis_enabled: bool = Field(True, env="REDIS_ENABLED")
+
     # Evaluation
     golden_dataset_path: str = Field("./data/processed/golden_qa.json", env="GOLDEN_DATASET_PATH")
+
+    review_threshold: float = Field(2.0, env="REVIEW_THRESHOLD")
 
     class Config:
         env_file = ".env"
