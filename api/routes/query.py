@@ -12,6 +12,18 @@ from generation.query_rewriter import query_rewriter
 from generation.generator import generator
 from observability.logger import setup_logger, Timer
 from observability.mlflow_tracker import log_query
+from observability.cache import query_cache
+from observability.metrics import (
+    QUERY_COUNTER,
+    QUERY_LATENCY,
+    RETRIEVAL_LATENCY,
+    RERANK_LATENCY,
+    GENERATION_LATENCY,
+    CACHE_HITS,
+    CACHE_MISSES,
+    REVIEW_COUNTER,
+    ERROR_COUNTER,
+)
 
 logger = setup_logger(__name__)
 settings = get_settings()
@@ -59,15 +71,23 @@ async def query(request: QueryRequest):
     Low confidence responses go to human review queue.
     """
     from api.routes.review import add_to_review_queue
-    from observability.cache import query_cache
 
     # Check cache first
     cached = query_cache.get(request.query, request.doc_type, request.rewrite)
     if cached:
+        CACHE_HITS.inc()
+        QUERY_COUNTER.labels(status="cache_hit").inc()
         return QueryResponse(**cached)
 
+    CACHE_MISSES.inc()
+
     total_start = time.perf_counter()
-    original_query, rewritten, reranked, timings = _run_pipeline(request)
+
+    try:
+        original_query, rewritten, reranked, timings = _run_pipeline(request)
+    except Exception as e:
+        ERROR_COUNTER.labels(error_type=type(e).__name__).inc()
+        raise
 
     top_score = reranked[0].get("rerank_score", 0) if reranked else 0
     needs_review = top_score < settings.review_threshold
@@ -78,6 +98,12 @@ async def query(request: QueryRequest):
     total_ms = (time.perf_counter() - total_start) * 1000
 
     sources = [Source(**s) for s in result["sources"]]
+
+    # Track latency metrics
+    RETRIEVAL_LATENCY.observe(timings["retrieval_ms"] / 1000)
+    RERANK_LATENCY.observe(timings["rerank_ms"] / 1000)
+    GENERATION_LATENCY.observe(generation_ms / 1000)
+    QUERY_LATENCY.observe(total_ms / 1000)
 
     # Log to MLflow
     log_query(
@@ -94,6 +120,8 @@ async def query(request: QueryRequest):
     )
 
     if needs_review:
+        REVIEW_COUNTER.inc()
+        QUERY_COUNTER.labels(status="review").inc()
         review_id = add_to_review_queue(
             query=original_query,
             rewritten_query=rewritten,
@@ -113,6 +141,8 @@ async def query(request: QueryRequest):
             model=result["model"],
         )
 
+    QUERY_COUNTER.labels(status="success").inc()
+
     response_data = QueryResponse(
         query=original_query,
         rewritten_query=rewritten,
@@ -121,14 +151,13 @@ async def query(request: QueryRequest):
         model=result["model"],
     )
 
-    # Cache the result — only cache high confidence answers
-    if not needs_review:
-        query_cache.set(
-            request.query,
-            request.doc_type,
-            request.rewrite,
-            response_data.model_dump(),
-        )
+    # Cache the result
+    query_cache.set(
+        request.query,
+        request.doc_type,
+        request.rewrite,
+        response_data.model_dump(),
+    )
 
     logger.info(
         "Query pipeline complete",
@@ -136,6 +165,7 @@ async def query(request: QueryRequest):
     )
 
     return response_data
+
 
 @router.get("/stream")
 async def stream_query(

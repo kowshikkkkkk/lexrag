@@ -1,6 +1,7 @@
 import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from config.settings import get_settings
 from config.constants import API_PREFIX
@@ -25,6 +26,9 @@ def create_app() -> FastAPI:
         docs_url=f"{API_PREFIX}/docs",
         redoc_url=f"{API_PREFIX}/redoc",
     )
+
+    # Prometheus metrics
+    Instrumentator().instrument(app).expose(app, endpoint=f"{API_PREFIX}/metrics")
 
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):
@@ -97,20 +101,6 @@ def create_app() -> FastAPI:
     @app.get(f"{API_PREFIX}/health")
     async def health():
         return {"status": "ok", "service": "LexRAG", "version": "1.0.0"}
-
-    @app.get(f"{API_PREFIX}/mlflow-test")
-    async def mlflow_test():
-        import mlflow
-        from config.settings import get_settings
-        s = get_settings()
-        try:
-            mlflow.set_tracking_uri(s.mlflow_tracking_uri)
-            mlflow.set_experiment(s.mlflow_experiment_name)
-            with mlflow.start_run(run_name="api_test"):
-                mlflow.log_metric("api_test_metric", 99.0)
-            return {"status": "run logged"}
-        except Exception as e:
-            return {"error": str(e)}
 
     from api.routes.ingest import router as ingest_router
     from api.routes.query import router as query_router
