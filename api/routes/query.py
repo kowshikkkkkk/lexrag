@@ -30,30 +30,44 @@ settings = get_settings()
 router = APIRouter(prefix="/query", tags=["Query"])
 
 
-def _run_pipeline(request: QueryRequest):
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
+executor = ThreadPoolExecutor(max_workers=4)
+
+async def _run_pipeline_async(request: QueryRequest):
     """
-    Shared pipeline logic for both standard and streaming endpoints.
-    Returns original_query, rewritten_query, reranked_chunks, timings
+    Async pipeline — runs CPU-bound steps in thread pool
+    so they don't block the event loop.
     """
     original_query = request.query
+    loop = asyncio.get_event_loop()
 
-    # Step 1 — Query rewriting
+    # Step 1 — Query rewriting (I/O bound — Groq API call)
     t0 = time.perf_counter()
     if request.rewrite:
-        rewritten = query_rewriter.rewrite(original_query)
+        rewritten = await loop.run_in_executor(
+            executor, query_rewriter.rewrite, original_query
+        )
     else:
         rewritten = original_query
     rewrite_ms = (time.perf_counter() - t0) * 1000
 
-    # Step 2 — Hybrid retrieval
+    # Step 2 — Hybrid retrieval (CPU bound — embedding + BM25)
     filters = {"doc_type": request.doc_type} if request.doc_type else None
     t0 = time.perf_counter()
-    chunks = retriever.retrieve(rewritten, top_k=request.top_k, filters=filters)
+    chunks = await loop.run_in_executor(
+        executor,
+        lambda: retriever.retrieve(rewritten, top_k=request.top_k, filters=filters)
+    )
     retrieval_ms = (time.perf_counter() - t0) * 1000
 
-    # Step 3 — Reranking
+    # Step 3 — Reranking (CPU bound — cross-encoder)
     t0 = time.perf_counter()
-    reranked = reranker.rerank(rewritten, chunks, top_k=request.top_k)
+    reranked = await loop.run_in_executor(
+        executor,
+        lambda: reranker.rerank(rewritten, chunks, top_k=request.top_k)
+    )
     rerank_ms = (time.perf_counter() - t0) * 1000
 
     return original_query, rewritten, reranked, {
@@ -84,7 +98,7 @@ async def query(request: QueryRequest):
     total_start = time.perf_counter()
 
     try:
-        original_query, rewritten, reranked, timings = _run_pipeline(request)
+        original_query, rewritten, reranked, timings = await _run_pipeline_async(request)
     except Exception as e:
         ERROR_COUNTER.labels(error_type=type(e).__name__).inc()
         raise
@@ -175,7 +189,7 @@ async def stream_query(
 ):
     """Streaming version — returns tokens via SSE."""
     request = QueryRequest(query=query, doc_type=doc_type, rewrite=rewrite)
-    original_query, rewritten, reranked, _ = _run_pipeline(request)
+    original_query, rewritten, reranked, _ = await _run_pipeline_async(request)
 
     def event_stream():
         try:
