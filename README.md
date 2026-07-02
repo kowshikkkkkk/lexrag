@@ -27,123 +27,26 @@ A production-ready Retrieval-Augmented Generation system for Indian legal docume
 ---
 
 ## 🏗️ System Architecture
-User Query
 
-│
+```mermaid
+flowchart TD
+    A[User Query] --> B["Query Rewriter<br/>Groq · llama-3.1-8b-instant<br/>Expands abbreviations · no section-number hallucination"]
+    B --> C{Hybrid Retrieval}
+    C --> D["Dense Search<br/>Qdrant · top-20"]
+    C --> E["BM25 Sparse<br/>Persistent index · top-20"]
+    D --> F["RRF Fusion<br/>k = 60"]
+    E --> F
+    F --> G["Cross-Encoder Reranking<br/>ms-marco-MiniLM-L-6-v2<br/>top-20 → top-5 / top-8"]
+    G --> H{Confidence Gate}
+    H -->|"score < 0.30"| I["Insufficient Information"]
+    H -->|"0.30 ≤ score < 2.0"| J["Human Review Queue"]
+    H -->|"score ≥ 2.0"| K["Generation<br/>Groq · llama-3.3-70b-versatile<br/>3000-token budget · citation enforcement · SSE streaming"]
+    K --> L["Redis Cache<br/>TTL 1h · miss ≈1.8s · hit &lt;5ms"]
+    L --> M["Cited Answer"]
+    J --> M
+```
 
-▼
-
-┌─────────────────────────────────────────┐
-
-│            Query Rewriter               │
-
-│   Groq (llama-3.1-8b-instant)          │
-
-│   Expands abbreviations                 │
-
-│   No section number hallucination       │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-┌─────────────────────────────────────────┐
-
-│           Hybrid Retrieval              │
-
-│                                         │
-
-│  ┌──────────────┐  ┌─────────────────┐  │
-
-│  │ Dense Search │  │  BM25 Sparse    │  │
-
-│  │  (Qdrant)   │  │  (Persistent)   │  │
-
-│  │  top-20     │  │    top-20       │  │
-
-│  └──────┬───────┘  └───────┬─────────┘  │
-
-│         └────────┬──────────┘            │
-
-│                  ▼                       │
-
-│           RRF Fusion (k=60)              │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-┌─────────────────────────────────────────┐
-
-│       Cross-Encoder Reranking           │
-
-│   ms-marco-MiniLM-L-6-v2               │
-
-│   top-20 → top-5 (or top-8)            │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-┌─────────────────────────────────────────┐
-
-│           Confidence Gate               │
-
-│                                         │
-
-│  score < 0.30  → Insufficient Info     │
-
-│  score < 2.0   → Human Review Queue    │
-
-│  score >= 2.0  → Direct Answer         │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-┌─────────────────────────────────────────┐
-
-│         Generation (Groq)               │
-
-│   llama-3.3-70b-versatile              │
-
-│   Token budget: 3000 tokens            │
-
-│   Citation enforcement                  │
-
-│   SSE Streaming                         │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-┌─────────────────────────────────────────┐
-
-│           Redis Cache                   │
-
-│   TTL: 1 hour                          │
-
-│   Cache miss: ~1.8s                    │
-
-│   Cache hit: <5ms                      │
-
-└──────────────────┬──────────────────────┘
-
-│
-
-▼
-
-Cited Answer
+**Pipeline in one line:** query → rewrite → hybrid retrieve (dense + BM25) → fuse → rerank → confidence-gate → generate (or route to a human) → cache → cited answer.
 
 ---
 
@@ -211,107 +114,60 @@ Every log line is a JSON object with timestamp, level, module, and a trace ID se
 ---
 
 ## 📁 Project Structure
+
+```
 lexrag/
-
 ├── config/
-
 │   ├── settings.py          # Pydantic settings — single source of truth
-
 │   ├── constants.py         # No magic numbers — system prompt, RRF_K etc
-
 │   └── exceptions.py        # Typed exception hierarchy per layer
-
 ├── ingestion/
-
 │   ├── loader.py            # PDF/TXT/DOCX loading, normalization, file hash
-
 │   └── pipeline.py          # Full ingest pipeline: load→chunk→embed→store→BM25
-
 ├── chunking/
-
 │   └── splitter.py          # Recursive + section-aware chunking
-
 ├── embeddings/
-
 │   └── embedder.py          # Singleton BGE embedder with batching + retry
-
 ├── vectorstore/
-
 │   └── store.py             # Qdrant wrapper — upsert, search, dedup
-
 ├── retrieval/
-
 │   ├── retriever.py         # Hybrid retrieval: dense + BM25 + RRF fusion
-
 │   ├── reranker.py          # Cross-encoder reranking
-
 │   └── bm25_index.py        # Persistent BM25 index — load once, rebuild on ingest
-
 ├── generation/
-
 │   ├── query_rewriter.py    # LLM-based query rewriting
-
 │   └── generator.py         # Generation with token budget + SSE streaming
-
 ├── api/
-
 │   ├── app.py               # FastAPI factory, middleware, exception handlers
-
 │   ├── schemas.py           # Pydantic request/response schemas
-
 │   ├── mcp_server.py        # MCP server exposing RAG tools to agents
-
 │   └── routes/
-
 │       ├── ingest.py        # POST /ingest
-
 │       ├── query.py         # POST /query, GET /query/stream
-
 │       └── review.py        # GET /review/pending, POST /review/decide
-
 ├── evaluation/
-
 │   └── ragas_eval.py        # LLM-judge evaluation: faithfulness, relevancy etc
-
 ├── observability/
-
 │   ├── logger.py            # JSON structured logging with trace IDs
-
 │   ├── mlflow_tracker.py    # MLflow experiment tracking
-
 │   ├── cache.py             # Redis query cache
-
 │   └── metrics.py           # Prometheus metrics
-
 ├── static/
-
 │   └── dashboard.py         # Streamlit dashboard
-
 ├── scripts/
-
 │   └── locustfile.py        # Load testing
-
 ├── tests/
-
 │   └── unit/
-
 │       ├── test_loader.py
-
 │       └── test_chunker.py
-
 ├── docker/
-
 │   ├── Dockerfile
-
 │   ├── docker-compose.yml
-
 │   └── prometheus.yml
-
 └── .github/
-
-└── workflows/
-
-└── ci.yml
+    └── workflows/
+        └── ci.yml
+```
 
 ---
 
@@ -455,25 +311,13 @@ LexRAG implements the **Model Context Protocol (MCP)**, making the entire RAG pi
 ### Why MCP matters here
 
 Without MCP, LexRAG is a standalone API. With MCP, it becomes a tool that an AI agent can autonomously call as part of a larger workflow:
-Legal Research Agent
 
-│
-
-├── web_search("Supreme Court judgment on bail 2024")
-
-│       → finds a PDF URL
-
-│
-
-├── ingest_document(file_path, doc_type="judgment")
-
-│       → LexRAG chunks, embeds, stores it
-
-│
-
-└── query_legal("What conditions did the court set for bail?")
-
-→ LexRAG retrieves, reranks, generates cited answer
+```mermaid
+flowchart TD
+    A["Legal Research Agent"] --> B["web_search('Supreme Court judgment on bail 2024')<br/>→ finds a PDF URL"]
+    B --> C["ingest_document(file_path, doc_type='judgment')<br/>→ LexRAG chunks, embeds, stores it"]
+    C --> D["query_legal('What conditions did the court set for bail?')<br/>→ LexRAG retrieves, reranks, generates cited answer"]
+```
 
 The agent found new legal content, ingested it, and queried it — all via MCP tool calls with zero human intervention.
 
@@ -506,35 +350,17 @@ The agent found new legal content, ingested it, and queried it — all via MCP t
 ## 🔄 Human-in-the-Loop Pipeline
 
 LexRAG implements a three-tier response system based on retrieval confidence:
-Reranker top score
 
-│
-
-├── < 0.30  →  "Insufficient information" (no hallucination)
-
-│
-
-├── 0.30–2.0 →  Human Review Queue
-
-│                   │
-
-│                   ├── Reviewer sees: query, rewritten query,
-
-│                   │   retrieved chunks with scores, draft answer
-
-│                   │
-
-│                   ├── Approve → answer delivered to user
-
-│                   │            + saved to golden dataset
-
-│                   │
-
-│                   └── Correct → corrected answer saved
-
-│
-
-└── > 2.0   →  Direct answer to user
+```mermaid
+flowchart TD
+    A["Reranker top score"] --> B{Confidence}
+    B -->|"< 0.30"| C["Insufficient information<br/>(no hallucination)"]
+    B -->|"0.30 – 2.0"| D["Human Review Queue"]
+    D --> D1["Reviewer sees: query, rewritten query,<br/>retrieved chunks with scores, draft answer"]
+    D1 --> D2["Approve → answer delivered to user<br/>+ saved to golden dataset"]
+    D1 --> D3["Correct → corrected answer saved"]
+    B -->|"> 2.0"| E["Direct answer to user"]
+```
 
 Every approved answer automatically becomes a golden dataset entry. Ground truth grows from real usage — no manual QA writing needed.
 
@@ -543,19 +369,15 @@ Every approved answer automatically becomes a golden dataset entry. Ground truth
 ## ⚡ Async Architecture
 
 CPU-bound operations run in a `ThreadPoolExecutor` to avoid blocking the async event loop:
-FastAPI (async)
 
-│
-
-├── run_in_executor() → embed query (CPU-bound)
-
-├── run_in_executor() → BM25 search (CPU-bound)
-
-├── run_in_executor() → cross-encoder rerank (CPU-bound)
-
-├── await Groq API → LLM generation (I/O-bound)
-
-└── SSE StreamingResponse → tokens flow to client as generated
+```mermaid
+flowchart TD
+    A["FastAPI (async)"] --> B["run_in_executor() → embed query (CPU-bound)"]
+    A --> C["run_in_executor() → BM25 search (CPU-bound)"]
+    A --> D["run_in_executor() → cross-encoder rerank (CPU-bound)"]
+    A --> E["await Groq API → LLM generation (I/O-bound)"]
+    E --> F["SSE StreamingResponse → tokens flow to client as generated"]
+```
 
 ---
 
@@ -650,5 +472,3 @@ Results are automatically logged to MLflow.
 ```bash
 pytest tests/unit/ -v
 ```
-
----
