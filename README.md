@@ -30,21 +30,23 @@ A production-ready Retrieval-Augmented Generation system for Indian legal docume
 
 ```mermaid
 flowchart TD
-    A[User Query] --> B["Query Rewriter<br/>Groq · llama-3.1-8b-instant<br/>Expands abbreviations · no section-number hallucination"]
-    B --> C{Hybrid Retrieval}
-    C --> D["Dense Search<br/>Qdrant · top-20"]
-    C --> E["BM25 Sparse<br/>Persistent index · top-20"]
-    D --> F["RRF Fusion<br/>k = 60"]
+    A["User Query"] --> B["Query Rewriter\nGroq - llama-3.1-8b-instant"]
+    B --> C{"Hybrid Retrieval"}
+    C --> D["Dense Search\nQdrant - top 20"]
+    C --> E["BM25 Sparse\nPersistent index - top 20"]
+    D --> F["RRF Fusion\nk = 60"]
     E --> F
-    F --> G["Cross-Encoder Reranking<br/>ms-marco-MiniLM-L-6-v2<br/>top-20 → top-5 / top-8"]
-    G --> H{Confidence Gate}
-    H -->|"score < 0.30"| I["Insufficient Information"]
-    H -->|"0.30 ≤ score < 2.0"| J["Human Review Queue"]
-    H -->|"score ≥ 2.0"| K["Generation<br/>Groq · llama-3.3-70b-versatile<br/>3000-token budget · citation enforcement · SSE streaming"]
-    K --> L["Redis Cache<br/>TTL 1h · miss ≈1.8s · hit &lt;5ms"]
+    F --> G["Cross-Encoder Reranking\nms-marco-MiniLM-L-6-v2"]
+    G --> H{"Confidence Gate"}
+    H -->|"score below 0.30"| I["Insufficient Information"]
+    H -->|"0.30 to 2.0"| J["Human Review Queue"]
+    H -->|"score above 2.0"| K["Generation\nGroq - llama-3.3-70b-versatile"]
+    K --> L["Redis Cache\nTTL 1 hour"]
     L --> M["Cited Answer"]
     J --> M
 ```
+
+*Query rewriting expands abbreviations without hallucinating section numbers. Generation uses a 3000-token budget with citation enforcement and SSE streaming. Cache: ~1.8s on miss, under 5ms on hit.*
 
 **Pipeline in one line:** query → rewrite → hybrid retrieve (dense + BM25) → fuse → rerank → confidence-gate → generate (or route to a human) → cache → cited answer.
 
@@ -314,9 +316,9 @@ Without MCP, LexRAG is a standalone API. With MCP, it becomes a tool that an AI 
 
 ```mermaid
 flowchart TD
-    A["Legal Research Agent"] --> B["web_search('Supreme Court judgment on bail 2024')<br/>→ finds a PDF URL"]
-    B --> C["ingest_document(file_path, doc_type='judgment')<br/>→ LexRAG chunks, embeds, stores it"]
-    C --> D["query_legal('What conditions did the court set for bail?')<br/>→ LexRAG retrieves, reranks, generates cited answer"]
+    A["Legal Research Agent"] --> B["web_search - Supreme Court judgment on bail 2024\nfinds a PDF URL"]
+    B --> C["ingest_document - file_path, doc_type=judgment\nLexRAG chunks, embeds, stores it"]
+    C --> D["query_legal - What conditions did the court set for bail\nLexRAG retrieves, reranks, generates cited answer"]
 ```
 
 The agent found new legal content, ingested it, and queried it — all via MCP tool calls with zero human intervention.
@@ -353,13 +355,13 @@ LexRAG implements a three-tier response system based on retrieval confidence:
 
 ```mermaid
 flowchart TD
-    A["Reranker top score"] --> B{Confidence}
-    B -->|"< 0.30"| C["Insufficient information<br/>(no hallucination)"]
-    B -->|"0.30 – 2.0"| D["Human Review Queue"]
-    D --> D1["Reviewer sees: query, rewritten query,<br/>retrieved chunks with scores, draft answer"]
-    D1 --> D2["Approve → answer delivered to user<br/>+ saved to golden dataset"]
-    D1 --> D3["Correct → corrected answer saved"]
-    B -->|"> 2.0"| E["Direct answer to user"]
+    A["Reranker top score"] --> B{"Confidence"}
+    B -->|"below 0.30"| C["Insufficient information\nno hallucination"]
+    B -->|"0.30 to 2.0"| D["Human Review Queue"]
+    D --> D1["Reviewer sees: query, rewritten query,\nretrieved chunks with scores, draft answer"]
+    D1 --> D2["Approve: answer delivered to user\nplus saved to golden dataset"]
+    D1 --> D3["Correct: corrected answer saved"]
+    B -->|"above 2.0"| E["Direct answer to user"]
 ```
 
 Every approved answer automatically becomes a golden dataset entry. Ground truth grows from real usage — no manual QA writing needed.
@@ -372,11 +374,11 @@ CPU-bound operations run in a `ThreadPoolExecutor` to avoid blocking the async e
 
 ```mermaid
 flowchart TD
-    A["FastAPI (async)"] --> B["run_in_executor() → embed query (CPU-bound)"]
-    A --> C["run_in_executor() → BM25 search (CPU-bound)"]
-    A --> D["run_in_executor() → cross-encoder rerank (CPU-bound)"]
-    A --> E["await Groq API → LLM generation (I/O-bound)"]
-    E --> F["SSE StreamingResponse → tokens flow to client as generated"]
+    A["FastAPI async event loop"] --> B["run_in_executor: embed query\nCPU-bound"]
+    A --> C["run_in_executor: BM25 search\nCPU-bound"]
+    A --> D["run_in_executor: cross-encoder rerank\nCPU-bound"]
+    A --> E["await Groq API: LLM generation\nI O-bound"]
+    E --> F["SSE StreamingResponse\ntokens flow to client as generated"]
 ```
 
 ---
