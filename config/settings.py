@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     redis_ttl: int = Field(3600, env="REDIS_TTL")  # 1 hour cache
     redis_enabled: bool = Field(True, env="REDIS_ENABLED")
 
+    # Semantic cache — catches paraphrased repeat queries the exact-match
+    # hash lookup would miss (e.g. "punishment for theft" vs "penalty for stealing")
+    semantic_cache_enabled: bool = Field(True, env="SEMANTIC_CACHE_ENABLED")
+    semantic_cache_threshold: float = Field(0.92, env="SEMANTIC_CACHE_THRESHOLD")
+    semantic_cache_max_candidates: int = Field(500, env="SEMANTIC_CACHE_MAX_CANDIDATES")
+
     # Evaluation
     golden_dataset_path: str = Field("./data/processed/golden_qa.json", env="GOLDEN_DATASET_PATH")
 
