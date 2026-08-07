@@ -75,19 +75,47 @@ def load_docx(file_path: Path) -> str:
 def normalize_text(text: str) -> str:
     """
     Clean raw extracted text.
-    - Normalize unicode
-    - Collapse excessive whitespace
-    - Remove null bytes
+    Handles PDF encoding artifacts, unicode issues, and whitespace.
     """
     import unicodedata
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("\x00", "")
-    # Collapse 3+ newlines into 2
     import re
+
+    # Normalize unicode
+    text = unicodedata.normalize("NFKC", text)
+
+    # Remove null bytes and control characters
+    text = text.replace("\x00", "")
+    text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+    # Fix common PDF encoding artifacts
+    text = text.replace("\u20ac", "")
+    text = text.replace("\u2018", "'")
+    text = text.replace("\u2019", "'")
+    text = text.replace("\u201c", '"')
+    text = text.replace("\u201d", '"')
+    text = text.replace("\u2013", "-")
+    text = text.replace("\u2014", " — ")  # em dash with spaces
+    text = text.replace("\ufffd", "")
+    text = text.replace("\u25a1", "")
+    text = text.replace("\u0192", "f")
+
+    # Fix mid-word line breaks from PDF extraction
+    text = re.sub(r"([A-Z])\n([a-z])", r"\1\2", text)
+    text = re.sub(r"(\w)-\n(\w)", r"\1\2", text)
+
+    # Add newline before section numbers for better chunking
+    text = re.sub(r"(^|\. )(\d{1,3}[A-Z]?\. )(?=[A-Z])", r"\1\n\2", text, flags=re.MULTILINE)
+
+    # Fix hyphenated line breaks
+    text = re.sub(r"-\n(\w)", r"\1", text)
+
+    # Collapse excessive whitespace
     text = re.sub(r"\n{3,}", "\n\n", text)
-    # Collapse multiple spaces into one
     text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"\t+", " ", text)
+
     return text.strip()
+
 
 
 def load_document(file_path: str, doc_type: str = DOC_TYPE_GENERIC) -> Document:

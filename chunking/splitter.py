@@ -30,20 +30,61 @@ class Chunk:
     chunk_id: Optional[str] = None
 
 # ── Section pattern — matches "Section 420", "Article 21", "Clause 3" ────────
+# Matches multiple legal document formats
 SECTION_PATTERN = re.compile(
-    r"((?:Section|SECTION|Article|ARTICLE|Clause|CLAUSE)\s+\d+[A-Z]?\.?)",
+    r"("
+    r"(?:Section|SECTION|Sec\.)\s+\d+[A-Za-z]?"
+    r"|(?:Article|ARTICLE|Art\.)\s+\d+[A-Za-z]?"
+    r"|(?:Clause|CLAUSE|Cl\.)\s+\d+[A-Za-z]?"
+    r"|(?:Rule|RULE)\s+\d+[A-Za-z]?"
+    r"|(?:Schedule|SCHEDULE)\s+[IVXLC]+"
+    r"|(?:Chapter|CHAPTER)\s+[IVXLC\d]+"
+    r"|\b\d{1,3}[A-Z]?\.\s+[A-Z\u201c\"]"
+    r"|\b\d{1,3}[A-Z]?\.\s+[A-Za-z].*?[\u2014\-]\s*$"
+    r")",
     re.MULTILINE,
 )
 
 
 def extract_section_metadata(text: str) -> dict:
     """
-    Look for a section header at the start of a chunk.
-    Returns act_name and section_number if found.
+    Extract section metadata from chunk text.
+    Handles multiple legal document formats.
     """
-    match = SECTION_PATTERN.search(text[:200])  # only check start of chunk
+    # Priority 1 — explicit Section/Article/Clause/Rule keyword
+    match = re.search(
+        r"((?:Section|SECTION|Article|ARTICLE|Clause|CLAUSE|Rule|RULE)\s+\d+[A-Za-z]?)",
+        text[:300]
+    )
     if match:
         return {META_SECTION_NUMBER: match.group(1).strip()}
+
+    # Priority 2 — bare number with em dash "302. Punishment for murder.—"
+    match = re.search(
+        r"^(\d{1,3}[A-Z]?)\.\s+\w.*?[\u2014\-]",
+        text[:300],
+        re.MULTILINE
+    )
+    if match:
+        return {META_SECTION_NUMBER: f"Section {match.group(1)}"}
+
+    # Priority 3 — bare number format "420. Title"
+    match = re.search(
+        r"^(\d{1,3}[A-Z]?)\.\s+[A-Z\u201c\"]",
+        text[:300],
+        re.MULTILINE
+    )
+    if match:
+        return {META_SECTION_NUMBER: f"Section {match.group(1)}"}
+
+    # Priority 4 — Chapter/Schedule
+    match = re.search(
+        r"((?:Chapter|CHAPTER|Schedule|SCHEDULE)\s+[IVXLC\d]+)",
+        text[:300]
+    )
+    if match:
+        return {META_SECTION_NUMBER: match.group(1).strip()}
+
     return {}
 
 

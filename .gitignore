@@ -3,3 +3,8 @@ __pycache__/
 *.pyo
 .pytest_cache/
 data/.env
+.env
+venv/
+data/
+__pycache__/
+*.pyc
