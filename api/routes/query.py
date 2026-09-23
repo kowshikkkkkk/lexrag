@@ -155,21 +155,31 @@ async def query(request: QueryRequest):
     if needs_review:
         REVIEW_COUNTER.inc()
         QUERY_COUNTER.labels(status="review").inc()
-        review_id = add_to_review_queue(
-            query=original_query,
-            rewritten_query=rewritten,
-            chunks=reranked,
-            draft_answer=result["answer"],
-            sources=result["sources"],
-        )
-        logger.info(
-            "Low confidence — sent to review",
-            extra={"review_id": review_id, "top_score": top_score}
-        )
+        try:
+            review_id = add_to_review_queue(
+                query=original_query,
+                rewritten_query=rewritten,
+                chunks=reranked,
+                draft_answer=result["answer"],
+                sources=result["sources"],
+            )
+            logger.info(
+                "Low confidence — sent to review",
+                extra={"review_id": review_id, "top_score": top_score}
+            )
+            answer_text = f"[Under Review: {review_id}] {result['answer']}"
+        except Exception as e:
+            ERROR_COUNTER.labels(error_type=type(e).__name__).inc()
+            logger.error(
+                "Failed to add item to review queue — returning answer without review tracking",
+                extra={"error": str(e)}
+            )
+            answer_text = result["answer"]
+
         return QueryResponse(
             query=original_query,
             rewritten_query=rewritten,
-            answer=f"[Under Review: {review_id}] {result['answer']}",
+            answer=answer_text,
             sources=sources,
             model=result["model"],
         )
