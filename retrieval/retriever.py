@@ -1,7 +1,7 @@
 from typing import Optional
 import hashlib
 from config.settings import get_settings
-from config.exceptions import RetrievalError, BelowConfidenceThresholdError
+from config.exceptions import RetrievalError
 from embeddings.embedder import embedder
 from vectorstore.store import vector_store
 from retrieval.bm25_index import bm25_index
@@ -104,21 +104,6 @@ class HybridRetriever:
             # Fuse results
             fused = self._rrf_fusion(dense_results, sparse_results)
 
-        # Confidence gate — top result must meet minimum threshold
-        # NOTE: left exactly as-is for now — this is a known separate bug
-        # (compares mismatched score scales) that we're fixing in the next step.
-        if not fused:
-            raise BelowConfidenceThresholdError(
-                "No relevant chunks found for this query."
-            )
-
-        top_score = fused[0].get("score", fused[0].get("rrf_score", 0))
-        if top_score < settings.min_similarity_threshold:
-            raise BelowConfidenceThresholdError(
-                "I do not have sufficient information in the provided documents "
-                "to answer this question."
-            )
-
         results = fused[:top_k]
 
         logger.info(
@@ -126,7 +111,7 @@ class HybridRetriever:
             extra={
                 "query": query[:80],
                 "results": len(results),
-                "top_score": fused[0].get("rrf_score", 0),
+                "top_score": fused[0].get("rrf_score", 0) if fused else 0,
                 "latency_ms": round(t.elapsed_ms, 2),
             }
         )
