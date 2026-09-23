@@ -58,6 +58,9 @@ class Settings(BaseSettings):
 
     review_threshold: float = Field(2.0, env="REVIEW_THRESHOLD")
 
+    # Concurrency / networking
+    thread_pool_workers: int = Field(20, env="THREAD_POOL_WORKERS")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

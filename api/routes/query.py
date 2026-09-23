@@ -33,7 +33,7 @@ router = APIRouter(prefix="/query", tags=["Query"])
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=settings.thread_pool_workers)
 
 async def _run_pipeline_async(request: QueryRequest):
     """
