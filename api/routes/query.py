@@ -104,6 +104,25 @@ async def query(request: QueryRequest):
         raise
 
     top_score = reranked[0].get("rerank_score", 0) if reranked else 0
+
+    # Confidence gate — runs here, not in retriever.py, because this is the
+    # first point where we have a rerank_score (cross-encoder scale), which is
+    # what min_similarity_threshold (0.30) and review_threshold (2.0) were
+    # actually calibrated against. See README pipeline diagram.
+    if not reranked or top_score < settings.min_similarity_threshold:
+        QUERY_COUNTER.labels(status="insufficient_info").inc()
+        logger.info(
+            "Below confidence threshold — returning insufficient info",
+            extra={"query": original_query[:80], "top_score": top_score}
+        )
+        return QueryResponse(
+            query=original_query,
+            rewritten_query=rewritten,
+            answer=INSUFFICIENT_INFO_RESPONSE,
+            sources=[],
+            model=settings.groq_model_quality,
+        )
+
     needs_review = top_score < settings.review_threshold
 
     t0 = time.perf_counter()
