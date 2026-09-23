@@ -1,5 +1,5 @@
 from typing import Optional
-
+import hashlib
 from config.settings import get_settings
 from config.exceptions import RetrievalError, BelowConfidenceThresholdError
 from embeddings.embedder import embedder
@@ -25,6 +25,19 @@ class HybridRetriever:
         query_vector = embedder.embed_query(query)
         return vector_store.search(query_vector, top_k=top_k, filters=filters)
 
+    @staticmethod
+    def _fusion_key(result: dict) -> str:
+        """
+        Unique key for RRF fusion. A 100-char text prefix collides whenever two
+        different chunks share an opening line. Prefer a real chunk_id from
+        metadata if present; otherwise hash the full text so only truly
+        identical chunks collide.
+        """
+        chunk_id = (result.get("metadata") or {}).get("chunk_id")
+        if chunk_id:
+            return str(chunk_id)
+        return hashlib.sha256(result["text"].encode("utf-8")).hexdigest()
+
     def _rrf_fusion(
         self,
         dense_results: list[dict],
@@ -40,13 +53,13 @@ class HybridRetriever:
 
         # Score from dense results
         for rank, result in enumerate(dense_results):
-            key = result["text"][:100]  # use first 100 chars as key
+            key = self._fusion_key(result)  
             scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
             texts[key] = result
 
         # Score from sparse results
         for rank, result in enumerate(sparse_results):
-            key = result["text"][:100]
+            key = self._fusion_key(result)
             scores[key] = scores.get(key, 0) + 1 / (k + rank + 1)
             if key not in texts:
                 texts[key] = result
