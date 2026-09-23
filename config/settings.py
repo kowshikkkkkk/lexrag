@@ -60,6 +60,7 @@ class Settings(BaseSettings):
 
     # Concurrency / networking
     thread_pool_workers: int = Field(20, env="THREAD_POOL_WORKERS")
+    llm_timeout_seconds: float = Field(10.0, env="LLM_TIMEOUT_SECONDS")
 
     class Config:
         env_file = ".env"
