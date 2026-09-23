@@ -1,5 +1,8 @@
 import os
 import pickle
+import shutil
+import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 from rank_bm25 import BM25Okapi
@@ -23,35 +26,58 @@ class PersistentBM25Index:
     Loaded once on startup.
     """
     _instance: Optional["PersistentBM25Index"] = None
+    _instance_lock = threading.Lock()
+    _op_lock = threading.Lock()
     _bm25: Optional[BM25Okapi] = None
     _corpus: list[dict] = []
 
     def __new__(cls):
+        # Check-then-create is not atomic — two threads racing at startup
+        # can both see _instance as None and both build one.
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def load(self):
         """Load index from disk if it exists."""
-        if self._bm25 is not None:
-            return
+        with self._op_lock:
+            if self._bm25 is not None:
+                return
 
-        if BM25_INDEX_PATH.exists() and BM25_CORPUS_PATH.exists():
-            try:
-                with open(BM25_INDEX_PATH, "rb") as f:
-                    self._bm25 = pickle.load(f)
-                with open(BM25_CORPUS_PATH, "rb") as f:
-                    self._corpus = pickle.load(f)
-                logger.info(
-                    "BM25 index loaded from disk",
-                    extra={"chunks": len(self._corpus)}
-                )
-            except Exception as e:
-                logger.warning(f"Failed to load BM25 index: {e}. Will rebuild.")
-                self._bm25 = None
-                self._corpus = []
-        else:
-            logger.info("No BM25 index found on disk — will build on first ingest")
+            if BM25_INDEX_PATH.exists() and BM25_CORPUS_PATH.exists():
+                try:
+                    with open(BM25_INDEX_PATH, "rb") as f:
+                        self._bm25 = pickle.load(f)
+                    with open(BM25_CORPUS_PATH, "rb") as f:
+                        self._corpus = pickle.load(f)
+                    logger.info(
+                        "BM25 index loaded from disk",
+                        extra={"chunks": len(self._corpus)}
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to load BM25 index: {e}. Will rebuild.")
+                    self._bm25 = None
+                    self._corpus = []
+            else:
+                logger.info("No BM25 index found on disk — will build on first ingest")
+
+    @staticmethod
+    def _atomic_pickle_dump(obj, path: Path):
+        """
+        Write via a temp file + atomic rename so a crash mid-write never
+        leaves a half-written or mismatched pickle on disk.
+        """
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(obj, f)
+            shutil.move(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
     def build(self, chunks: list[dict]):
         """
@@ -62,16 +88,18 @@ class PersistentBM25Index:
             logger.warning("No chunks provided to build BM25 index")
             return
 
-        self._corpus = chunks
-        tokenized = [tokenize(c["text"]) for c in chunks]
-        self._bm25 = BM25Okapi(tokenized)
+        with self._op_lock:
+            corpus = chunks
+            tokenized = [tokenize(c["text"]) for c in chunks]
+            bm25 = BM25Okapi(tokenized)
 
-        # Save to disk
-        BM25_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(BM25_INDEX_PATH, "wb") as f:
-            pickle.dump(self._bm25, f)
-        with open(BM25_CORPUS_PATH, "wb") as f:
-            pickle.dump(self._corpus, f)
+            BM25_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_pickle_dump(bm25, BM25_INDEX_PATH)
+            self._atomic_pickle_dump(corpus, BM25_CORPUS_PATH)
+
+            # Only swap in-memory state once both files are safely on disk.
+            self._bm25 = bm25
+            self._corpus = corpus
 
         logger.info(
             "BM25 index built and saved to disk",
