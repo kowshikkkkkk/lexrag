@@ -1,21 +1,15 @@
-import numpy as np
-from rank_bm25 import BM25Okapi
 from typing import Optional
 
 from config.settings import get_settings
-from config.constants import RRF_K
 from config.exceptions import RetrievalError, BelowConfidenceThresholdError
 from embeddings.embedder import embedder
 from vectorstore.store import vector_store
+from retrieval.bm25_index import bm25_index
+from config.constants import RRF_K
 from observability.logger import setup_logger, Timer
 
 logger = setup_logger(__name__)
 settings = get_settings()
-
-
-def tokenize(text: str) -> list[str]:
-    """Simple whitespace tokenizer for BM25."""
-    return text.lower().split()
 
 
 class HybridRetriever:
@@ -24,59 +18,12 @@ class HybridRetriever:
     using Reciprocal Rank Fusion.
     """
 
-    def _get_all_chunks(self, filters: Optional[dict] = None) -> list[dict]:
-        """
-        Fetch all chunks from Qdrant to build BM25 index.
-        In production with millions of chunks you'd maintain a separate
-        BM25 index on disk — for now we build it per query from stored chunks.
-        """
-        try:
-            results, _ = vector_store._client.scroll(
-                collection_name=settings.qdrant_collection_name,
-                with_payload=True,
-                with_vectors=False,
-                limit=10000,
-            )
-            chunks = []
-            for r in results:
-                text = r.payload.get("text", "")
-                if text:
-                    chunks.append({
-                        "text": text,
-                        "metadata": r.payload,
-                        "id": r.id,
-                    })
-            return chunks
-        except Exception as e:
-            raise RetrievalError(f"Failed to fetch chunks for BM25: {e}")
-
     def _dense_search(
         self, query: str, top_k: int, filters: Optional[dict]
     ) -> list[dict]:
         """Embed query and search Qdrant."""
         query_vector = embedder.embed_query(query)
         return vector_store.search(query_vector, top_k=top_k, filters=filters)
-
-    def _sparse_search(
-        self, query: str, all_chunks: list[dict], top_k: int
-    ) -> list[dict]:
-        """BM25 search over all chunks."""
-        corpus = [tokenize(c["text"]) for c in all_chunks]
-        bm25 = BM25Okapi(corpus)
-        query_tokens = tokenize(query)
-        scores = bm25.get_scores(query_tokens)
-
-        # Get top_k indices sorted by score
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        results = []
-        for idx in top_indices:
-            if scores[idx] > 0:  # only include chunks with non-zero BM25 score
-                results.append({
-                    "text": all_chunks[idx]["text"],
-                    "metadata": all_chunks[idx]["metadata"],
-                    "score": float(scores[idx]),
-                })
-        return results
 
     def _rrf_fusion(
         self,
@@ -134,23 +81,19 @@ class HybridRetriever:
         )
 
         with Timer("hybrid_retrieval", logger) as t:
-            # Fetch all chunks for BM25
-            all_chunks = self._get_all_chunks(filters)
-
-            if not all_chunks:
-                raise RetrievalError("No chunks found in vector store. Ingest documents first.")
-
             # Run dense and sparse search
             with Timer("dense_search", logger):
                 dense_results = self._dense_search(query, dense_k, filters)
 
             with Timer("sparse_search", logger):
-                sparse_results = self._sparse_search(query, all_chunks, sparse_k)
+                sparse_results = bm25_index.search(query, sparse_k)
 
             # Fuse results
             fused = self._rrf_fusion(dense_results, sparse_results)
 
         # Confidence gate — top result must meet minimum threshold
+        # NOTE: left exactly as-is for now — this is a known separate bug
+        # (compares mismatched score scales) that we're fixing in the next step.
         if not fused:
             raise BelowConfidenceThresholdError(
                 "No relevant chunks found for this query."
