@@ -217,17 +217,42 @@ async def stream_query(
     rewrite: bool = True,
 ):
     """Streaming version — returns tokens via SSE."""
+    import json
+
     request = QueryRequest(query=query, doc_type=doc_type, rewrite=rewrite)
     original_query, rewritten, reranked, _ = await _run_pipeline_async(request)
 
+    top_score = reranked[0].get("rerank_score", 0) if reranked else 0
+    if not reranked or top_score < settings.min_similarity_threshold:
+        def insufficient_stream():
+            yield f"data: {json.dumps({'type': 'sources', 'data': []})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'data': INSUFFICIENT_INFO_RESPONSE})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(
+            insufficient_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    source_payload = [
+        {
+            "document": c["metadata"].get("source", "Unknown"),
+            "section": c["metadata"].get("section_number", ""),
+            "doc_type": c["metadata"].get("doc_type", ""),
+            "rerank_score": c.get("rerank_score", 0),
+        }
+        for c in reranked
+    ]
+
     def event_stream():
         try:
+            yield f"data: {json.dumps({'type': 'sources', 'data': source_payload})}\n\n"
             for token in generator.stream(rewritten, reranked):
-                yield f"data: {token}\n\n"
+                yield f"data: {json.dumps({'type': 'token', 'data': token})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Streaming error: {e}")
-            yield f"data: [ERROR] {str(e)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
 
     return StreamingResponse(
         event_stream(),
