@@ -15,7 +15,7 @@ logger = setup_logger(__name__)
 settings = get_settings()
 
 
-def _build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
+def _build_context(chunks: list[dict], query: str = "") -> tuple[str, list[dict]]:
     """
     Build context string from chunks respecting token budget.
     Returns the context string and the list of chunks that fit.
@@ -24,12 +24,21 @@ def _build_context(chunks: list[dict]) -> tuple[str, list[dict]]:
     used_chunks = []
     total_tokens = 0
 
+    # MAX_CONTEXT_TOKENS was previously spent entirely on chunk text, with
+    # the system prompt and the question itself uncounted. Reserve their
+    # tokens (plus a buffer for citation formatting/separators) before
+    # filling the rest of the budget with chunks.
+    system_tokens = len(SYSTEM_PROMPT.split()) * TOKENS_PER_WORD
+    query_tokens = len(query.split()) * TOKENS_PER_WORD
+    reserved_tokens = system_tokens + query_tokens + 200
+    available_tokens = max(MAX_CONTEXT_TOKENS - reserved_tokens, 0)
+
     for chunk in chunks:
         text = chunk["text"]
         # Rough token estimate
         chunk_tokens = len(text.split()) * TOKENS_PER_WORD
 
-        if total_tokens + chunk_tokens > MAX_CONTEXT_TOKENS:
+        if total_tokens + chunk_tokens > available_tokens:
             logger.warning(
                 "Token budget reached, truncating context",
                 extra={"chunks_used": len(used_chunks), "chunks_skipped": len(chunks) - len(used_chunks)}
@@ -80,7 +89,7 @@ class Generator:
                 "model": settings.groq_model_quality,
             }
 
-        context, used_chunks = _build_context(chunks)
+        context, used_chunks = _build_context(chunks, query)
 
         if not context:
             raise ContextWindowExceededError("No chunks fit within token budget.")
@@ -97,6 +106,7 @@ class Generator:
                     ],
                     max_tokens=1024,
                     temperature=0.1,
+                    timeout=settings.llm_timeout_seconds,
                 )
 
             answer = response.choices[0].message.content.strip()
@@ -141,7 +151,7 @@ class Generator:
             yield INSUFFICIENT_INFO_RESPONSE
             return
 
-        context, _ = _build_context(chunks)
+        context, _ = _build_context(chunks, query)
 
         if not context:
             raise ContextWindowExceededError("No chunks fit within token budget.")
@@ -158,6 +168,7 @@ class Generator:
                 max_tokens=1024,
                 temperature=0.1,
                 stream=True,  # key difference
+                timeout=settings.llm_timeout_seconds,
             )
 
             logger.info("Streaming generation started", extra={"query": query[:80]})

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     api_port: int = Field(8000, env="API_PORT")
     log_level: str = Field("INFO", env="LOG_LEVEL")
 
-# Redis
+    # Redis
     redis_host: str = Field("localhost", env="REDIS_HOST")
     redis_port: int = Field(6379, env="REDIS_PORT")
     redis_ttl: int = Field(3600, env="REDIS_TTL")  # 1 hour cache
@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     golden_dataset_path: str = Field("./data/processed/golden_qa.json", env="GOLDEN_DATASET_PATH")
 
     review_threshold: float = Field(2.0, env="REVIEW_THRESHOLD")
+
+    # Concurrency / networking
+    thread_pool_workers: int = Field(20, env="THREAD_POOL_WORKERS")
+    llm_timeout_seconds: float = Field(10.0, env="LLM_TIMEOUT_SECONDS")
 
     class Config:
         env_file = ".env"

@@ -56,6 +56,7 @@ class QueryRewriter:
                     ],
                     max_tokens=100,
                     temperature=0.1,  # low temp — we want consistent rewrites
+                    timeout=settings.llm_timeout_seconds,
                 )
 
             rewritten = response.choices[0].message.content.strip()

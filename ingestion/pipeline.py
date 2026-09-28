@@ -42,15 +42,17 @@ def ingest_document(file_path: str, doc_type: str) -> dict:
         # Step 3 — Chunk
         chunks = split_document(document)
 
-        # Step 4 — Embed
-        texts = [c.text for c in chunks]
-        vectors = embedder.embed_texts(texts)
+        # Step 4 — Clean, then embed (embedding must run on the same text
+        # that gets stored — previously cleaning happened after embedding,
+        # so the vector represented raw PDF-artifact text while the stored/
+        # displayed text was cleaned, meaning the two no longer matched).
+        clean_texts = [clean_chunk_text(c.text) for c in chunks]
+        vectors = embedder.embed_texts(clean_texts)
 
         # Step 5 — Store in Qdrant
         chunk_ids = [c.chunk_id for c in chunks]
         metadata_list = []
-        for chunk, text in zip(chunks, texts):
-            clean_text = clean_chunk_text(text)
+        for chunk, clean_text in zip(chunks, clean_texts):
             meta = {**chunk.metadata, "text": clean_text}
             metadata_list.append(meta)
 

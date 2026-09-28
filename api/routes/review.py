@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import tempfile
+import threading
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -15,6 +19,30 @@ router = APIRouter(prefix="/review", tags=["Human Review"])
 QUEUE_FILE = Path("./data/processed/review_queue.json")
 APPROVED_FILE = Path("./data/processed/approved_answers.json")
 
+# Guards read-modify-write cycles on the queue/approved JSON files. Without
+# this, two concurrent requests can both read the same list, both append/
+# modify independently, and whichever write happens last silently discards
+# the other's change (lost update).
+_queue_lock = threading.Lock()
+_approved_lock = threading.Lock()
+
+
+def _atomic_write_json(path: Path, data):
+    """
+    Write via temp file + atomic rename so a crash or kill mid-write can't
+    leave a truncated, unparseable JSON file behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        shutil.move(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
 
 def _load_queue() -> list[dict]:
     if not QUEUE_FILE.exists():
@@ -23,7 +51,7 @@ def _load_queue() -> list[dict]:
 
 
 def _save_queue(queue: list[dict]):
-    QUEUE_FILE.write_text(json.dumps(queue, indent=2))
+    _atomic_write_json(QUEUE_FILE, queue)
 
 
 def _load_approved() -> list[dict]:
@@ -33,7 +61,7 @@ def _load_approved() -> list[dict]:
 
 
 def _save_approved(approved: list[dict]):
-    APPROVED_FILE.write_text(json.dumps(approved, indent=2))
+    _atomic_write_json(APPROVED_FILE, approved)
 
 
 def add_to_review_queue(
@@ -68,9 +96,10 @@ def add_to_review_queue(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    queue = _load_queue()
-    queue.append(item)
-    _save_queue(queue)
+    with _queue_lock:
+        queue = _load_queue()
+        queue.append(item)
+        _save_queue(queue)
 
     logger.info(
         "Added to review queue",
@@ -93,34 +122,36 @@ async def decide(decision: ReviewDecision):
     Approve or correct a review item.
     Approved answers are saved to the golden dataset automatically.
     """
-    queue = _load_queue()
-    item = next((q for q in queue if q["review_id"] == decision.review_id), None)
+    with _queue_lock:
+        queue = _load_queue()
+        item = next((q for q in queue if q["review_id"] == decision.review_id), None)
 
-    if not item:
-        return {"error": f"Review item {decision.review_id} not found"}
+        if not item:
+            return {"error": f"Review item {decision.review_id} not found"}
 
-    # Update status
-    item["status"] = "approved" if decision.approved else "rejected"
-    item["reviewed_at"] = datetime.now(timezone.utc).isoformat()
-    item["reviewer_note"] = decision.reviewer_note
+        # Update status
+        item["status"] = "approved" if decision.approved else "rejected"
+        item["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        item["reviewer_note"] = decision.reviewer_note
 
-    final_answer = decision.corrected_answer or item["draft_answer"]
-    item["final_answer"] = final_answer
+        final_answer = decision.corrected_answer or item["draft_answer"]
+        item["final_answer"] = final_answer
 
-    _save_queue(queue)
+        _save_queue(queue)
 
     # If approved — save to golden dataset for evaluation
     if decision.approved:
-        approved = _load_approved()
-        approved.append({
-            "question": item["query"],
-            "rewritten_query": item["rewritten_query"],
-            "answer": final_answer,
-            "contexts": [c["text"] for c in item["retrieved_chunks"]],
-            "sources": item["sources"],
-            "approved_at": item["reviewed_at"],
-        })
-        _save_approved(approved)
+        with _approved_lock:
+            approved = _load_approved()
+            approved.append({
+                "question": item["query"],
+                "rewritten_query": item["rewritten_query"],
+                "answer": final_answer,
+                "contexts": [c["text"] for c in item["retrieved_chunks"]],
+                "sources": item["sources"],
+                "approved_at": item["reviewed_at"],
+            })
+            _save_approved(approved)
 
         logger.info(
             "Answer approved and added to golden dataset",
@@ -132,6 +163,7 @@ async def decide(decision: ReviewDecision):
         "status": item["status"],
         "final_answer": final_answer,
     }
+
 
 
 @router.get("/approved")

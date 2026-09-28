@@ -33,7 +33,7 @@ router = APIRouter(prefix="/query", tags=["Query"])
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=settings.thread_pool_workers)
 
 async def _run_pipeline_async(request: QueryRequest):
     """
@@ -104,6 +104,25 @@ async def query(request: QueryRequest):
         raise
 
     top_score = reranked[0].get("rerank_score", 0) if reranked else 0
+
+    # Confidence gate — runs here, not in retriever.py, because this is the
+    # first point where we have a rerank_score (cross-encoder scale), which is
+    # what min_similarity_threshold (0.30) and review_threshold (2.0) were
+    # actually calibrated against. See README pipeline diagram.
+    if not reranked or top_score < settings.min_similarity_threshold:
+        QUERY_COUNTER.labels(status="insufficient_info").inc()
+        logger.info(
+            "Below confidence threshold — returning insufficient info",
+            extra={"query": original_query[:80], "top_score": top_score}
+        )
+        return QueryResponse(
+            query=original_query,
+            rewritten_query=rewritten,
+            answer=INSUFFICIENT_INFO_RESPONSE,
+            sources=[],
+            model=settings.groq_model_quality,
+        )
+
     needs_review = top_score < settings.review_threshold
 
     t0 = time.perf_counter()
@@ -136,21 +155,31 @@ async def query(request: QueryRequest):
     if needs_review:
         REVIEW_COUNTER.inc()
         QUERY_COUNTER.labels(status="review").inc()
-        review_id = add_to_review_queue(
-            query=original_query,
-            rewritten_query=rewritten,
-            chunks=reranked,
-            draft_answer=result["answer"],
-            sources=result["sources"],
-        )
-        logger.info(
-            "Low confidence — sent to review",
-            extra={"review_id": review_id, "top_score": top_score}
-        )
+        try:
+            review_id = add_to_review_queue(
+                query=original_query,
+                rewritten_query=rewritten,
+                chunks=reranked,
+                draft_answer=result["answer"],
+                sources=result["sources"],
+            )
+            logger.info(
+                "Low confidence — sent to review",
+                extra={"review_id": review_id, "top_score": top_score}
+            )
+            answer_text = f"[Under Review: {review_id}] {result['answer']}"
+        except Exception as e:
+            ERROR_COUNTER.labels(error_type=type(e).__name__).inc()
+            logger.error(
+                "Failed to add item to review queue — returning answer without review tracking",
+                extra={"error": str(e)}
+            )
+            answer_text = result["answer"]
+
         return QueryResponse(
             query=original_query,
             rewritten_query=rewritten,
-            answer=f"[Under Review: {review_id}] {result['answer']}",
+            answer=answer_text,
             sources=sources,
             model=result["model"],
         )
@@ -188,17 +217,42 @@ async def stream_query(
     rewrite: bool = True,
 ):
     """Streaming version — returns tokens via SSE."""
+    import json
+
     request = QueryRequest(query=query, doc_type=doc_type, rewrite=rewrite)
     original_query, rewritten, reranked, _ = await _run_pipeline_async(request)
 
+    top_score = reranked[0].get("rerank_score", 0) if reranked else 0
+    if not reranked or top_score < settings.min_similarity_threshold:
+        def insufficient_stream():
+            yield f"data: {json.dumps({'type': 'sources', 'data': []})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'data': INSUFFICIENT_INFO_RESPONSE})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(
+            insufficient_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    source_payload = [
+        {
+            "document": c["metadata"].get("source", "Unknown"),
+            "section": c["metadata"].get("section_number", ""),
+            "doc_type": c["metadata"].get("doc_type", ""),
+            "rerank_score": c.get("rerank_score", 0),
+        }
+        for c in reranked
+    ]
+
     def event_stream():
         try:
+            yield f"data: {json.dumps({'type': 'sources', 'data': source_payload})}\n\n"
             for token in generator.stream(rewritten, reranked):
-                yield f"data: {token}\n\n"
+                yield f"data: {json.dumps({'type': 'token', 'data': token})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"Streaming error: {e}")
-            yield f"data: [ERROR] {str(e)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
 
     return StreamingResponse(
         event_stream(),

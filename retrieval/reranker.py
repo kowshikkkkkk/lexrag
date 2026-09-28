@@ -1,3 +1,4 @@
+import threading
 from sentence_transformers import CrossEncoder
 from typing import Optional
 
@@ -15,25 +16,30 @@ class Reranker:
     Takes query + list of chunks, returns reranked list.
     """
     _instance: Optional["Reranker"] = None
+    _instance_lock = threading.Lock()
+    _load_lock = threading.Lock()
     _model: Optional[CrossEncoder] = None
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def load(self):
-        if self._model is not None:
-            return
-        logger.info(
-            "Loading reranker model",
-            extra={"model": settings.rerank_model}
-        )
-        try:
-            self._model = CrossEncoder(settings.rerank_model)
-            logger.info("Reranker model loaded successfully")
-        except Exception as e:
-            raise RetrievalError(f"Failed to load reranker: {e}")
+        with self._load_lock:
+            if self._model is not None:
+                return
+            logger.info(
+                "Loading reranker model",
+                extra={"model": settings.rerank_model}
+            )
+            try:
+                self._model = CrossEncoder(settings.rerank_model)
+                logger.info("Reranker model loaded successfully")
+            except Exception as e:
+                raise RetrievalError(f"Failed to load reranker: {e}")
 
     def rerank(self, query: str, chunks: list[dict], top_k: int = None) -> list[dict]:
         """
